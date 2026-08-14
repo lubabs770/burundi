@@ -95,6 +95,15 @@ get_active()   { local a; a=$(cat "$TDIR/active" 2>/dev/null); echo "${a:-defaul
 set_active()   { printf '%s' "$1" > "$TDIR/active"; }
 thread_model() { local m; m=$(cat "$TDIR/${1}.model" 2>/dev/null); echo "${m:-$DEFMODEL}"; }
 
+# Strip nerd-font icon glyphs (Unicode Private Use Areas) + CRs, so SMS output
+# isn't full of tofu boxes from icon-ized aliases (e.g. ls='eza --icons').
+sanitize_out() {
+	if command -v perl >/dev/null 2>&1; then
+		perl -CSD -pe 's/\r//g; s/[\x{E000}-\x{F8FF}\x{F0000}-\x{FFFFD}\x{100000}-\x{10FFFD}]//g'
+	else
+		LC_ALL=C tr -d '\r'
+	fi
+}
 ensure_shell() { tmux has-session -t "$SHELL_SESS" 2>/dev/null || \
 	tmux new-session -d -s "$SHELL_SESS" -c "$HOME" -x 200 -y 50; }
 shell_cwd()    { tmux display-message -p -t "$SHELL_SESS" '#{pane_current_path}' 2>/dev/null; }
@@ -110,7 +119,7 @@ run_shell() {                                   # $1 = command line; echoes its 
 		printf '%s\n' "$raw" | grep -qxF "$e" && break
 		sleep 0.2; tries=$((tries+1))
 	done
-	printf '%s\n' "$raw" | awk -v s="$s" -v e="$e" '$0==s{c=1;next} $0==e{c=0} c'
+	printf '%s\n' "$raw" | awk -v s="$s" -v e="$e" '$0==s{c=1;next} $0==e{c=0} c' | sanitize_out
 }
 
 run_claude() {                                  # $1 = prompt
