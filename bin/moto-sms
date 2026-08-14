@@ -122,6 +122,38 @@ run_shell() {                                   # $1 = command line; echoes its 
 	printf '%s\n' "$raw" | awk -v s="$s" -v e="$e" '$0==s{c=1;next} $0==e{c=0} c' | sanitize_out
 }
 
+# ── inbound MMS image attachments ────────────────────────────────────────────
+fetch_attachment() {  # $1=msg id  $2=partId  $3=outfile ; 0 if bytes saved
+	local id="$1" pid="$2" out="$3" tmp; tmp=$(mktemp)
+	curl -sS -m 30 -u "${GATEWAY_USER}:${GATEWAY_PASS}" \
+		"${GATEWAY_URL}/inbox/${id}/attachments/${pid}" -o "$tmp" 2>/dev/null
+	if [ "$(head -c1 "$tmp" 2>/dev/null)" = "{" ]; then       # JSON {data:base64}
+		jq -r '.data // empty' "$tmp" 2>/dev/null | base64 -d > "$out" 2>/dev/null
+	else mv "$tmp" "$out" 2>/dev/null; fi                     # or raw bytes
+	rm -f "$tmp" 2>/dev/null
+	[ -s "$out" ]
+}
+# Save any image attachments on a received message; echo saved file paths.
+ingest_attachments() {  # $1 = raw message JSON
+	local m="$1" id n i ct pid name ext out b64 dir
+	n=$(printf '%s' "$m" | jq '(.attachments // []) | length' 2>/dev/null) || return 0
+	[ "${n:-0}" -gt 0 ] || return 0
+	id=$(printf '%s' "$m" | jq -r '.id // "nomsg"')
+	dir="$STATE/media/$id"; mkdir -p "$dir"
+	for i in $(seq 0 $((n-1))); do
+		ct=$(printf '%s' "$m" | jq -r ".attachments[$i].contentType // \"\"")
+		case "$ct" in image/*) ;; *) continue ;; esac        # images only
+		pid=$(printf '%s' "$m" | jq -r ".attachments[$i].partId // \"$i\"")
+		name=$(printf '%s' "$m" | jq -r ".attachments[$i].name // empty")
+		ext=${ct#image/}; ext=${ext%%;*}; [ -n "$ext" ] || ext=jpg
+		out="$dir/${name:-part-$pid}"; case "$out" in *.*) ;; *) out="$out.$ext" ;; esac
+		b64=$(printf '%s' "$m" | jq -r ".attachments[$i].data // empty")
+		if [ -n "$b64" ]; then printf '%s' "$b64" | base64 -d > "$out" 2>/dev/null
+		else fetch_attachment "$id" "$pid" "$out" || continue; fi
+		[ -s "$out" ] && printf '%s\n' "$out"
+	done
+}
+
 run_claude() {                                  # $1 = prompt
 	local prompt="$1" active malias model sidf resume=() out reply newsid errf note=""
 	active=$(get_active); malias=$(thread_model "$active"); model=$(resolve_model "$malias")
@@ -226,7 +258,7 @@ cc_status() {
 
 # ── handle: route ONE message (raw JSON on stdin) ─────────────────────────────
 cmd_handle() {
-	local msg from text sender_key first rest name alias act names lines n mark f out
+	local msg from text sender_key first rest name alias act names lines n mark f out nat imgs cap
 	msg=$(cat)
 	from=$(printf '%s' "$msg" | jq -r '.phoneNumber // .from // .sender // .address // "?"')
 	text=$(printf '%s' "$msg" | jq -r '.message // .text // .textMessage.text // .body // .contentPreview // "?"')
@@ -237,6 +269,18 @@ cmd_handle() {
 
 	local TDIR="${THREADS}/${sender_key}" SHELL_SESS="sms-${sender_key}"
 	mkdir -p "$TDIR"
+
+	# inbound image(s): save + let Claude view them via the Read tool (multimodal)
+	nat=$(printf '%s' "$msg" | jq '(.attachments // []) | length' 2>/dev/null)
+	if [ "${nat:-0}" -gt 0 ]; then
+		imgs=$(ingest_attachments "$msg")
+		if [ -n "$imgs" ]; then
+			cap="$text"; [ "$cap" = "?" ] && cap=""
+			run_claude "$(printf 'The user sent %s image(s) over SMS. View each file with the Read tool, then respond about them.\nFiles:\n%s\n%s' \
+				"$(printf '%s\n' "$imgs" | grep -c .)" "$imgs" "${cap:+Caption from the user: $cap}")"
+			return 0
+		fi
+	fi
 
 	# one-off raw shell, works regardless of mode
 	case "$text" in
