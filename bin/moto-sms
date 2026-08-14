@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# moto-sms — Claude-over-SMS + remote shell via the Moto G7 gateway.
+#
+# One program, many subcommands:
+#   moto-sms relay             poll the gateway /inbox and dispatch each new SMS
+#   moto-sms watchdog          revive the phone over adb if the tailnet path dies
+#   moto-sms handle            process ONE message (raw JSON on stdin) — the router
+#   moto-sms send <to> <msg>   send an SMS out the gateway
+#   moto-sms status            gateway health + service states + threads
+#   moto-sms threads           list Claude threads per sender
+#   moto-sms tail [n]          tail the assistant log
+#   moto-sms help
+#
+# SECURITY: past the allow-list a text has FULL control of omarchy — raw shell
+# (rm included) and Claude with --dangerously-skip-permissions. The allow-list
+# (~/.config/moto-sms/allow) is the ONLY boundary; SMS sender IDs are spoofable.
+set -uo pipefail
+
+SELF="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+MOTO="$SELF/bin/moto-sms"
+# shellcheck source=/dev/null
+. "$SELF/lib/common.sh"
+
+# ── relay: adaptive poll of /inbox, dispatch new messages to `handle` ─────────
+cmd_relay() {
+	[ -f "$CFG" ] || { echo "moto-sms relay: missing $CFG" >&2; exit 1; }
+	: "${POLL_MIN:=3}"; : "${POLL_MAX:=60}"; : "${POLL_DECAY:=16}"
+	touch "$SEEN"
+	local interval="$POLL_MAX" resp msg id hits
+	echo "moto-sms relay: adaptive poll ${GATEWAY_URL}/inbox (${POLL_MIN}s..${POLL_MAX}s)" >&2
+	while :; do
+		hits=0
+		if resp=$(curl -sS -m 15 -u "${GATEWAY_USER}:${GATEWAY_PASS}" "${GATEWAY_URL}/inbox" 2>/dev/null); then
+			while IFS= read -r msg; do
+				[ -z "$msg" ] && continue
+				id=$(printf '%s' "$msg" | jq -r '.id // empty' 2>/dev/null); [ -z "$id" ] && continue
+				if ! grep -qxF -- "$id" "$SEEN"; then
+					printf '%s\n' "$id" >> "$SEEN"
+					printf '%s\n' "$msg" >> "$INBOX_LOG"
+					printf '%s' "$msg" | "$MOTO" handle || true
+					hits=$((hits+1))
+				fi
+			done < <(printf '%s' "$resp" | jq -c '.[]?' 2>/dev/null)
+		fi
+		if [ "$hits" -gt 0 ]; then interval="$POLL_MIN"
+		else interval=$(( interval * POLL_DECAY / 10 ))
+			[ "$interval" -gt "$POLL_MAX" ] && interval="$POLL_MAX"
+			[ "$interval" -lt "$POLL_MIN" ] && interval="$POLL_MIN"
+		fi
+		sleep "$interval"
+	done
+}
+
+# ── watchdog: health-check the gateway, revive over adb after sustained fails ──
+cmd_watchdog() {
+	[ -f "$CFG" ] || { echo "moto-sms watchdog: missing $CFG" >&2; exit 1; }
+	local INTERVAL="${WATCHDOG_INTERVAL:-120}" FAIL_THRESHOLD="${WATCHDOG_FAILS:-3}"
+	# Device-specific; set these in ~/.config/moto-sms/env (empty = channel skipped).
+	local USB_SERIAL="${WATCHDOG_USB_SERIAL:-}" LAN_ADB="${WATCHDOG_LAN_ADB:-}"
+	local VPN_APP="${WATCHDOG_VPN_APP:-com.tailscale.ipn}" fails=0
+	adb_channel() {
+		if [ -n "$USB_SERIAL" ] && [ "$(adb -s "$USB_SERIAL" get-state 2>/dev/null)" = "device" ]; then
+			printf '%s' "$USB_SERIAL"; return 0; fi
+		if [ -n "$LAN_ADB" ]; then
+			adb connect "$LAN_ADB" >/dev/null 2>&1
+			if [ "$(adb -s "$LAN_ADB" get-state 2>/dev/null)" = "device" ]; then printf '%s' "$LAN_ADB"; return 0; fi
+		fi
+		return 1
+	}
+	revive() {
+		local ch; ch=$(adb_channel) || { wlog "REVIVE skipped: no adb channel (needs USB or physical)"; return 1; }
+		wlog "REVIVE via $ch: re-set always_on_vpn + relaunch tailscale"
+		adb -s "$ch" shell settings put secure always_on_vpn_app "$VPN_APP" >/dev/null 2>&1
+		adb -s "$ch" shell monkey -p "$VPN_APP" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+		[ "$ch" = "$USB_SERIAL" ] && adb -s "$ch" tcpip 5555 >/dev/null 2>&1
+		return 0
+	}
+	wlog "watchdog start: check ${GATEWAY_URL}/health every ${INTERVAL}s, revive after ${FAIL_THRESHOLD} fails"
+	while :; do
+		if curl -sS -m 10 -u "${GATEWAY_USER}:${GATEWAY_PASS}" "${GATEWAY_URL}/health" 2>/dev/null \
+			| jq -e '.status=="pass"' >/dev/null 2>&1; then
+			[ "$fails" -gt 0 ] && wlog "gateway healthy again (was $fails fail(s))"; fails=0
+		else
+			fails=$((fails+1)); wlog "gateway unreachable/unhealthy ($fails/$FAIL_THRESHOLD)"
+			if [ "$fails" -ge "$FAIL_THRESHOLD" ]; then revive || true; fails=0; fi
+		fi
+		sleep "$INTERVAL"
+	done
+}
+
+# ── handle helpers (dynamic-scoped: see cmd_handle's TDIR/SHELL_SESS/from) ────
+get_mode()     { cat "$TDIR/mode"   2>/dev/null || echo claude; }
+set_mode()     { printf '%s' "$1" > "$TDIR/mode"; }
+get_active()   { local a; a=$(cat "$TDIR/active" 2>/dev/null); echo "${a:-default}"; }
+set_active()   { printf '%s' "$1" > "$TDIR/active"; }
+thread_model() { local m; m=$(cat "$TDIR/${1}.model" 2>/dev/null); echo "${m:-$DEFMODEL}"; }
+
+ensure_shell() { tmux has-session -t "$SHELL_SESS" 2>/dev/null || \
+	tmux new-session -d -s "$SHELL_SESS" -c "$HOME" -x 200 -y 50; }
+shell_cwd()    { tmux display-message -p -t "$SHELL_SESS" '#{pane_current_path}' 2>/dev/null; }
+run_shell() {                                   # $1 = command line; echoes its output
+	ensure_shell
+	local m s e raw tries=0
+	m="SMS$$_${RANDOM}"; s="S${m}"; e="E${m}"
+	# markers bracket the output; ';' (not &&) so E prints even on error, and the
+	# command runs in the LIVE shell so cd/env persist to the next text.
+	tmux send-keys -t "$SHELL_SESS" "echo ${s}; ${1}; echo ${e}" Enter
+	while [ $tries -lt 150 ]; do                 # up to ~30s
+		raw=$(tmux capture-pane -p -t "$SHELL_SESS" -S -800)
+		printf '%s\n' "$raw" | grep -qxF "$e" && break
+		sleep 0.2; tries=$((tries+1))
+	done
+	printf '%s\n' "$raw" | awk -v s="$s" -v e="$e" '$0==s{c=1;next} $0==e{c=0} c'
+}
+
+run_claude() {                                  # $1 = prompt
+	local prompt="$1" active malias model sidf resume=() out reply newsid errf note=""
+	active=$(get_active); malias=$(thread_model "$active"); model=$(resolve_model "$malias")
+	sidf="$TDIR/${active}.session"
+	[ -s "$sidf" ] && resume=(--resume "$(cat "$sidf")")
+	local sys="SMS_PIPELINE: Moto SMS gateway — texting live with the owner over SMS from ${from}, thread '${active}'. See CLAUDE.md 'SMS pipeline'. Replies under ${MAXCHARS} chars, plain text, no markdown/lists unless asked. Be direct."
+	[ "$(get_mode)" = "aish" ] && sys="${sys} SHELL-ASSIST: treat each message as a shell task, run it via Bash (start in $(shell_cwd 2>/dev/null || echo "$HOME")), report output tersely."
+
+	errf=$(mktemp)
+	out=$(claude -p "$prompt" --model "$model" --output-format json \
+		--append-system-prompt "$sys" --dangerously-skip-permissions "${resume[@]}" 2>"$errf")
+	reply=$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null)
+	newsid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
+	# auto-recover from context overflow: drop bloated session, retry fresh once
+	if [ -z "$reply" ] && { printf '%s' "$out"; cat "$errf"; } | grep -qiE 'prompt is too long|context (window|length)|too long'; then
+		log "thread '${active}' hit context limit; starting fresh"
+		: > "$sidf"
+		out=$(claude -p "$prompt" --model "$model" --output-format json \
+			--append-system-prompt "$sys" --dangerously-skip-permissions 2>"$errf")
+		reply=$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null)
+		newsid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
+		note="(thread was full, started fresh) "
+	fi
+	rm -f "$errf"
+	[ -n "$newsid" ] && printf '%s' "$newsid" > "$sidf"
+	if [ -z "$reply" ]; then
+		log "claude returned no reply for ${from} on thread '${active}'"
+		send_sms "no reply (error) — try /new to reset thread '${active}'" "$from"; return 0
+	fi
+	send_sms "${note}${reply}" "$from"
+}
+
+# ── handle: route ONE message (raw JSON on stdin) ─────────────────────────────
+cmd_handle() {
+	local msg from text sender_key first rest name alias act names lines n mark f out
+	msg=$(cat)
+	from=$(printf '%s' "$msg" | jq -r '.phoneNumber // .from // .sender // .address // "?"')
+	text=$(printf '%s' "$msg" | jq -r '.message // .text // .textMessage.text // .body // .contentPreview // "?"')
+	printf '%s  from %s: %s\n' "$(date -Is)" "$from" "$text" >> "$RECV_LOG"
+
+	sender_key=$(norm "$from"); [ -z "$sender_key" ] && return 0
+	if ! allow_check "$sender_key"; then log "DENIED (not in allow-list) from ${from}: ${text}"; return 0; fi
+
+	local TDIR="${THREADS}/${sender_key}" SHELL_SESS="sms-${sender_key}"
+	mkdir -p "$TDIR"
+
+	# one-off raw shell, works regardless of mode
+	case "$text" in
+		'!'*) out=$(run_shell "${text#!}"); send_sms "${out:-(no output)}" "$from"; return 0 ;;
+	esac
+
+	first=$(printf '%s' "$text" | awk '{print $1}')
+	rest=$(printf '%s' "$text" | sed -E 's/^[^[:space:]]+[[:space:]]*//')
+	case "$first" in
+		/help)
+			send_sms "cmds: /new [name] /stop /resume <name> /convos | /sh /aish /ai !<cmd> | /model [haiku|sonnet|opus|fable] /status. plain text=talk to active thread." "$from"; return 0 ;;
+		/status)
+			send_sms "mode=$(get_mode) thread=$(get_active) model=$(thread_model "$(get_active)") cwd=$(ensure_shell; shell_cwd)" "$from"; return 0 ;;
+		/new)
+			name="${rest:-default}"; name=$(printf '%s' "$name" | awk '{print $1}')
+			: > "$TDIR/${name}.session"; set_active "$name"; set_mode claude
+			send_sms "new thread '${name}' (model $(thread_model "$name")). talking now." "$from"; return 0 ;;
+		/stop)
+			set_active ""; send_sms "stopped. /resume <name> or /new to continue." "$from"; return 0 ;;
+		/resume)
+			if [ -z "$rest" ]; then
+				names=$(cd "$TDIR" && ls ./*.session 2>/dev/null | sed 's|\./||;s/\.session$//' | paste -sd' ' -)
+				send_sms "threads: ${names:-none}. use /resume <name>." "$from"; return 0
+			fi
+			name=$(printf '%s' "$rest" | awk '{print $1}')
+			if [ -f "$TDIR/${name}.session" ]; then set_active "$name"; set_mode claude
+				send_sms "resumed '${name}' (model $(thread_model "$name"))." "$from"
+			else send_sms "no thread '${name}'. /convos to list, /new ${name} to start." "$from"; fi
+			return 0 ;;
+		/convos)
+			act=$(get_active); lines=""
+			for f in "$TDIR"/*.session; do [ -e "$f" ] || continue
+				n=$(basename "$f" .session); mark=""; [ "$n" = "$act" ] && mark="*"
+				lines="${lines}${mark}${n}($(thread_model "$n")) "; done
+			send_sms "threads: ${lines:-none}  (*=active)" "$from"; return 0 ;;
+		/sh)
+			set_mode sh; ensure_shell
+			send_sms "shell mode. plain text runs in the live shell. cwd=$(shell_cwd). /ai to exit." "$from"; return 0 ;;
+		/aish)
+			set_mode aish; ensure_shell
+			send_sms "shell-assist (Claude runs cmds) on thread $(get_active). /ai to exit." "$from"; return 0 ;;
+		/ai)
+			set_mode claude; send_sms "conversation mode, thread $(get_active)." "$from"; return 0 ;;
+		/model)
+			act=$(get_active)
+			if [ -z "$rest" ]; then send_sms "thread '${act}' model=$(thread_model "$act"). set: /model haiku|sonnet|opus|fable" "$from"
+			else alias=$(printf '%s' "$rest" | awk '{print $1}'); printf '%s' "$alias" > "$TDIR/${act}.model"
+				send_sms "thread '${act}' model -> ${alias} ($(resolve_model "$alias"))." "$from"; fi
+			return 0 ;;
+		/*)
+			send_sms "unknown command ${first}. /help for list." "$from"; return 0 ;;
+	esac
+
+	# plain text: route by mode
+	case "$(get_mode)" in
+		sh)  out=$(run_shell "$text"); send_sms "${out:-(no output)}" "$from" ;;
+		*)   run_claude "$text" ;;   # claude + aish
+	esac
+}
+
+# ── send: manual outbound ─────────────────────────────────────────────────────
+cmd_send() { local to="${1:-}"; shift || true; [ -n "$to" ] || { echo "usage: moto-sms send <to> <msg>" >&2; exit 1; }; send_sms "$*" "$to"; }
+
+# ── ops ───────────────────────────────────────────────────────────────────────
+cmd_status() {
+	local h; h=$(curl -sS -m 8 -u "${GATEWAY_USER:-}:${GATEWAY_PASS:-}" "${GATEWAY_URL:-}/health" 2>/dev/null | jq -r '.status // "unreachable"' 2>/dev/null)
+	echo "gateway ${GATEWAY_URL:-?}: ${h:-unreachable}"
+	local s; for s in moto-sms-relay moto-sms-watchdog; do echo "$s: $(systemctl --user is-active "$s.service" 2>/dev/null)"; done
+	echo "senders:"; cmd_threads
+}
+cmd_threads() {
+	local d n; for d in "$THREADS"/*/; do [ -d "$d" ] || continue
+		echo "  $(basename "$d"): $(cd "$d" && ls ./*.session 2>/dev/null | sed 's|\./||;s/\.session$//' | paste -sd' ' -) [mode=$(cat "$d/mode" 2>/dev/null || echo claude), active=$(cat "$d/active" 2>/dev/null)]"
+	done
+}
+cmd_tail() { tail -n "${1:-20}" "$ALOG"; }
+cmd_help() { sed -n '2,20p' "$SELF/bin/moto-sms" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-help}" in
+	relay)    shift; cmd_relay "$@" ;;
+	watchdog) shift; cmd_watchdog "$@" ;;
+	handle)   shift; cmd_handle "$@" ;;
+	send)     shift; cmd_send "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	threads)  shift; cmd_threads "$@" ;;
+	tail)     shift; cmd_tail "$@" ;;
+	*)        cmd_help ;;
+esac

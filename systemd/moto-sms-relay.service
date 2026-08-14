@@ -1,0 +1,11 @@
+[Unit]
+Description=Moto SMS inbox relay (poll gateway /inbox over Tailscale, dispatch received SMS)
+After=network-online.target
+
+[Service]
+ExecStart=@BIN@ relay
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

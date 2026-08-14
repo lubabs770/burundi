@@ -1,0 +1,11 @@
+[Unit]
+Description=Moto SMS gateway watchdog (revive phone over adb if tailnet path dies)
+After=network-online.target
+
+[Service]
+ExecStart=@BIN@ watchdog
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
