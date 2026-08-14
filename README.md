@@ -40,6 +40,7 @@ Config/state/data keep their XDG homes (only the code lives here):
     .ai                       back to conversation
     .model [haiku|sonnet|opus|fable]   per-thread model (no arg = show)
     .status .help
+    .ccstatus                 Claude Code account + git identity + active 5h usage
 
 Commands use a leading '.' (easier to reach than '/' on phone keyboards).
 Unknown '.'-tokens aren't intercepted, so shell paths (./run.sh, ., .bashrc)
