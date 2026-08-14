@@ -160,6 +160,25 @@ run_claude() {                                  # $1 = prompt
 # instead: group assistant-message usage into fixed 5h blocks (floored to the
 # hour, split on a >5h gap), take the active one, report tokens + time-to-reset.
 usage_status() {
+	# Prefer the native snapshot cached by the statusline (exact used_percentage +
+	# resets_at). resets_at is absolute so "left" stays accurate; % is as-of capture.
+	local cache="$HOME/.local/state/claude-usage/rate-limits.json" out
+	if [ -s "$cache" ]; then
+		out=$(jq -r --argjson now "$(date +%s)" '
+			.rate_limits.five_hour as $f
+			| if $f == null then empty else
+			  ( $f.resets_at ) as $r
+			  | ( if ($r|type)=="number" then (if $r>1e12 then $r/1000 else $r end)
+			      else ($r|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601) end ) as $rt
+			  | ($rt-$now) as $left
+			  | (($now-.captured_at)/60|floor) as $age
+			  | "5h block: \($f.used_percentage)% used, resets in "
+			    + (if $left<=0 then "0h 0m (elapsed)" else "\(($left/3600|floor))h \((($left%3600)/60|floor))m" end)
+			    + (if $age>10 then " (native, \($age)m old)" else " (native)" end)
+			  end' "$cache" 2>/dev/null)
+		[ -n "$out" ] && { printf '%s' "$out"; return 0; }
+	fi
+	# fallback: estimate the active block from transcripts (no native % available)
 	find "$HOME/.claude/projects" -name '*.jsonl' -mmin -360 -print0 2>/dev/null \
 	| xargs -0 grep -hF '"usage"' 2>/dev/null \
 	| jq -rs '
