@@ -149,7 +149,7 @@ run_claude() {                                  # $1 = prompt
 	[ -n "$newsid" ] && printf '%s' "$newsid" > "$sidf"
 	if [ -z "$reply" ]; then
 		log "claude returned no reply for ${from} on thread '${active}'"
-		send_sms "no reply (error) — try /new to reset thread '${active}'" "$from"; return 0
+		send_sms "no reply (error) — try .new to reset thread '${active}'" "$from"; return 0
 	fi
 	send_sms "${note}${reply}" "$from"
 }
@@ -175,51 +175,52 @@ cmd_handle() {
 
 	first=$(printf '%s' "$text" | awk '{print $1}')
 	rest=$(printf '%s' "$text" | sed -E 's/^[^[:space:]]+[[:space:]]*//')
+	# Commands use a leading '.' (easier to reach on phone keyboards than '/').
+	# Matching is strict: an unknown '.'-token is NOT intercepted, so shell paths
+	# like ./run.sh, ., .bashrc fall through to the active mode instead of erroring.
 	case "$first" in
-		/help)
-			send_sms $'moto-sms commands\n\nchat: just type a message\n/new [name] - fresh thread\n/stop - end thread\n/resume <name> - switch\n/convos - list threads\n\nshell:\n!<cmd> - run one command\n/sh - shell mode (cd persists)\n/aish - Claude runs cmds\n/ai - back to chat\n\n/model haiku|sonnet|opus|fable\n/status' "$from"; return 0 ;;
-		/status)
+		.help)
+			send_sms $'moto-sms commands\n\nchat: just type a message\n.new [name] - fresh thread\n.stop - end thread\n.resume <name> - switch\n.convos - list threads\n\nshell:\n!<cmd> - run one command\n.sh - shell mode (cd persists)\n.aish - Claude runs cmds\n.ai - back to chat\n\n.model haiku|sonnet|opus|fable\n.status' "$from"; return 0 ;;
+		.status)
 			send_sms "mode=$(get_mode) thread=$(get_active) model=$(thread_model "$(get_active)") cwd=$(ensure_shell; shell_cwd)" "$from"; return 0 ;;
-		/new)
+		.new)
 			name="${rest:-default}"; name=$(printf '%s' "$name" | awk '{print $1}')
 			: > "$TDIR/${name}.session"; set_active "$name"; set_mode claude
 			send_sms "new thread '${name}' (model $(thread_model "$name")). talking now." "$from"; return 0 ;;
-		/stop)
-			set_active ""; send_sms "stopped. /resume <name> or /new to continue." "$from"; return 0 ;;
-		/resume)
+		.stop)
+			set_active ""; send_sms "stopped. .resume <name> or .new to continue." "$from"; return 0 ;;
+		.resume)
 			if [ -z "$rest" ]; then
 				names=$(cd "$TDIR" && ls ./*.session 2>/dev/null | sed 's|\./||;s/\.session$//' | paste -sd' ' -)
-				send_sms "threads: ${names:-none}. use /resume <name>." "$from"; return 0
+				send_sms "threads: ${names:-none}. use .resume <name>." "$from"; return 0
 			fi
 			name=$(printf '%s' "$rest" | awk '{print $1}')
 			if [ -f "$TDIR/${name}.session" ]; then set_active "$name"; set_mode claude
 				send_sms "resumed '${name}' (model $(thread_model "$name"))." "$from"
-			else send_sms "no thread '${name}'. /convos to list, /new ${name} to start." "$from"; fi
+			else send_sms "no thread '${name}'. .convos to list, .new ${name} to start." "$from"; fi
 			return 0 ;;
-		/convos)
+		.convos)
 			act=$(get_active); lines=""
 			for f in "$TDIR"/*.session; do [ -e "$f" ] || continue
 				n=$(basename "$f" .session); mark=""; [ "$n" = "$act" ] && mark="*"
 				lines="${lines}${mark}${n}($(thread_model "$n")) "; done
-			if [ -z "$lines" ]; then send_sms "no threads yet. /new [name] or just start chatting to begin one." "$from"
+			if [ -z "$lines" ]; then send_sms "no threads yet. .new [name] or just start chatting to begin one." "$from"
 			else send_sms "threads (*=active): ${lines}" "$from"; fi
 			return 0 ;;
-		/sh)
+		.sh)
 			set_mode sh; ensure_shell
-			send_sms "shell mode. plain text runs in the live shell. cwd=$(shell_cwd). /ai to exit." "$from"; return 0 ;;
-		/aish)
+			send_sms "shell mode. plain text runs in the live shell. cwd=$(shell_cwd). .ai to exit." "$from"; return 0 ;;
+		.aish)
 			set_mode aish; ensure_shell
-			send_sms "shell-assist (Claude runs cmds) on thread $(get_active). /ai to exit." "$from"; return 0 ;;
-		/ai)
+			send_sms "shell-assist (Claude runs cmds) on thread $(get_active). .ai to exit." "$from"; return 0 ;;
+		.ai)
 			set_mode claude; send_sms "conversation mode, thread $(get_active)." "$from"; return 0 ;;
-		/model)
+		.model)
 			act=$(get_active)
-			if [ -z "$rest" ]; then send_sms "thread '${act}' model=$(thread_model "$act"). set: /model haiku|sonnet|opus|fable" "$from"
+			if [ -z "$rest" ]; then send_sms "thread '${act}' model=$(thread_model "$act"). set: .model haiku|sonnet|opus|fable" "$from"
 			else alias=$(printf '%s' "$rest" | awk '{print $1}'); printf '%s' "$alias" > "$TDIR/${act}.model"
 				send_sms "thread '${act}' model -> ${alias} ($(resolve_model "$alias"))." "$from"; fi
 			return 0 ;;
-		/*)
-			send_sms "unknown command ${first}. /help for list." "$from"; return 0 ;;
 	esac
 
 	# plain text: route by mode

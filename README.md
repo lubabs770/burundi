@@ -30,16 +30,20 @@ Config/state/data keep their XDG homes (only the code lives here):
 ## SMS command grammar (what you text the phone)
 
     <plain text>              talk to Claude on the active thread
-    /new [name]               fresh thread (also clears a context-overflowed one)
-    /stop                     detach current thread
-    /resume <name>            switch threads  (/resume alone lists them)
-    /convos                   list threads (*=active) with model
+    .new [name]               fresh thread (also clears a context-overflowed one)
+    .stop                     detach current thread
+    .resume <name>            switch threads  (.resume alone lists them)
+    .convos                   list threads (*=active) with model
     !<cmd>                    run ONE raw shell command (any mode)
-    /sh                       sticky raw-shell mode (plain text -> live tmux shell)
-    /aish                     sticky shell-assist (Claude runs the commands)
-    /ai                       back to conversation
-    /model [haiku|sonnet|opus|fable]   per-thread model (no arg = show)
-    /status /help
+    .sh                       sticky raw-shell mode (plain text -> live tmux shell)
+    .aish                     sticky shell-assist (Claude runs the commands)
+    .ai                       back to conversation
+    .model [haiku|sonnet|opus|fable]   per-thread model (no arg = show)
+    .status .help
+
+Commands use a leading '.' (easier to reach than '/' on phone keyboards).
+Unknown '.'-tokens aren't intercepted, so shell paths (./run.sh, ., .bashrc)
+still work in shell mode.
 
 Raw shell runs in a per-sender tmux session (`sms-<10digits>`), so `cd`/env
 persist across texts.
