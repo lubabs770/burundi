@@ -154,12 +154,41 @@ run_claude() {                                  # $1 = prompt
 	send_sms "${note}${reply}" "$from"
 }
 
+# Active 5-hour usage block, computed locally from Claude Code transcripts (no
+# external tool). Native rate_limits (used_percentage/resets_at) only arrive on
+# the live statusline stdin and aren't persisted, so this mirrors ccusage's model
+# instead: group assistant-message usage into fixed 5h blocks (floored to the
+# hour, split on a >5h gap), take the active one, report tokens + time-to-reset.
+usage_status() {
+	find "$HOME/.claude/projects" -name '*.jsonl' -mmin -360 -print0 2>/dev/null \
+	| xargs -0 grep -hF '"usage"' 2>/dev/null \
+	| jq -rs '
+	    [ .[] | select(.type=="assistant" and .message.usage and .timestamp)
+	      | { t:(.timestamp|sub("\\.[0-9]+Z$";"Z")|fromdateiso8601),
+	          io:((.message.usage.input_tokens//0)+(.message.usage.output_tokens//0)),
+	          ca:((.message.usage.cache_creation_input_tokens//0)+(.message.usage.cache_read_input_tokens//0)) } ]
+	    | sort_by(.t)
+	    | if length==0 then "5h block: idle (no usage in 6h)" else
+	      ( reduce .[] as $e ({b:[],c:null};
+	          if .c==null then {b:.b,c:{s:($e.t-($e.t%3600)),l:$e.t,io:$e.io,ca:$e.ca}}
+	          elif ($e.t-.c.l>=18000) or ($e.t>=.c.s+18000)
+	            then {b:(.b+[.c]),c:{s:($e.t-($e.t%3600)),l:$e.t,io:$e.io,ca:$e.ca}}
+	          else {b:.b,c:{s:.c.s,l:$e.t,io:(.c.io+$e.io),ca:(.c.ca+$e.ca)}} end)
+	        | (.b+[.c])|last ) as $blk
+	      | (now) as $n | ($blk.s+18000-$n) as $left
+	      | def h(x): if x>=1000000 then "\((x/100000|floor)/10)M" elif x>=1000 then "\(x/1000|floor)k" else "\(x)" end;
+	        if $left<=0 then "5h block: idle (window elapsed)"
+	        else "5h block: in+out \(h($blk.io)), cache \(h($blk.ca)), resets in \(($left/3600|floor))h \((($left%3600)/60|floor))m"
+	        end
+	      end' 2>/dev/null
+}
+
 # Text version of the Claude Code statusline (~/.claude/powerline-with-identity.sh):
 # the billed Anthropic account + the git commit identity, evaluated at the live
-# shell's cwd. The powerline box's session segments (cost/context/model) need a
-# live CC session's stdin JSON, which doesn't exist over SMS, so they're omitted.
+# shell's cwd, plus the active 5h usage block. The powerline box's per-session
+# segments (context/model) need live CC stdin JSON, absent over SMS, so they're out.
 cc_status() {
-	local dir acct name cc_email cc_org tag ghcfg
+	local dir acct name cc_email cc_org tag ghcfg u
 	ensure_shell; dir=$(shell_cwd); [ -z "$dir" ] && dir="$HOME"
 	# mirror the dir-driven gh account switch (careflow => work gh config)
 	case "$dir" in
@@ -171,8 +200,9 @@ cc_status() {
 	cc_email=$(jq -r '.oauthAccount.emailAddress // empty' "$HOME/.claude.json" 2>/dev/null)
 	cc_org=$(jq -r '.oauthAccount.organizationName // empty' "$HOME/.claude.json" 2>/dev/null)
 	case "$cc_org$cc_email" in *[Cc]areflow*|*gocareflow*) tag="WORK" ;; *) tag="personal" ;; esac
-	printf 'Claude Code acct [%s]:\n%s%s\n\ngit identity @ %s:\ngh: %s\nname: %s' \
-		"$tag" "${cc_email:-none}" "${cc_org:+ - $cc_org}" "$dir" "${acct:-none}" "${name:-none}"
+	u=$(usage_status); [ -z "$u" ] && u="5h block: usage unavailable"
+	printf 'Claude Code acct [%s]:\n%s%s\n\ngit identity @ %s:\ngh: %s\nname: %s\n\n%s' \
+		"$tag" "${cc_email:-none}" "${cc_org:+ - $cc_org}" "$dir" "${acct:-none}" "${name:-none}" "$u"
 }
 
 # ── handle: route ONE message (raw JSON on stdin) ─────────────────────────────
@@ -201,7 +231,7 @@ cmd_handle() {
 	# like ./run.sh, ., .bashrc fall through to the active mode instead of erroring.
 	case "$first" in
 		.help)
-			send_sms $'moto-sms commands\n\nchat: just type a message\n.new [name] - fresh thread\n.stop - end thread\n.resume <name> - switch\n.convos - list threads\n\nshell:\n!<cmd> - run one command\n.sh - shell mode (cd persists)\n.aish - Claude runs cmds\n.ai - back to chat\n\n.model haiku|sonnet|opus|fable\n.status - mode/thread/cwd\n.ccstatus - cc account + git identity' "$from"; return 0 ;;
+			send_sms $'moto-sms commands\n\nchat: just type a message\n.new [name] - fresh thread\n.stop - end thread\n.resume <name> - switch\n.convos - list threads\n\nshell:\n!<cmd> - run one command\n.sh - shell mode (cd persists)\n.aish - Claude runs cmds\n.ai - back to chat\n\n.model haiku|sonnet|opus|fable\n.status - mode/thread/cwd\n.ccstatus - cc account, identity, 5h usage' "$from"; return 0 ;;
 		.status)
 			send_sms "mode=$(get_mode) thread=$(get_active) model=$(thread_model "$(get_active)") cwd=$(ensure_shell; shell_cwd)" "$from"; return 0 ;;
 		.ccstatus)
