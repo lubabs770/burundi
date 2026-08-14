@@ -201,7 +201,9 @@ cmd_handle() {
 			for f in "$TDIR"/*.session; do [ -e "$f" ] || continue
 				n=$(basename "$f" .session); mark=""; [ "$n" = "$act" ] && mark="*"
 				lines="${lines}${mark}${n}($(thread_model "$n")) "; done
-			send_sms "threads: ${lines:-none}  (*=active)" "$from"; return 0 ;;
+			if [ -z "$lines" ]; then send_sms "no threads yet. /new [name] or just start chatting to begin one." "$from"
+			else send_sms "threads (*=active): ${lines}" "$from"; fi
+			return 0 ;;
 		/sh)
 			set_mode sh; ensure_shell
 			send_sms "shell mode. plain text runs in the live shell. cwd=$(shell_cwd). /ai to exit." "$from"; return 0 ;;
