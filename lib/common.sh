@@ -23,9 +23,10 @@ mkdir -p "$THREADS" "$LOG_DIR"
 [ -f "$CFG" ] && . "$CFG"
 
 DEFMODEL="${CLAUDE_SMS_MODEL:-haiku}"   # default model ALIAS for new threads
-MAXCHARS="${CLAUDE_SMS_MAXCHARS:-1500}" # reply cap. Transport is SMS (SmsManager,
-# not RCS): auto-split into 153-char GSM-7 segments (67 if any non-GSM char). This
-# is a runaway guard, not a protocol limit; override with CLAUDE_SMS_MAXCHARS.
+MAXCHARS="${CLAUDE_SMS_MAXCHARS:-4000}" # reply cap. Transport is SMS (SmsManager,
+# not RCS): auto-split into 153-char GSM-7 segments (67 if any non-GSM char), and
+# the phone reassembles them into one message (confirmed). So this is only a
+# cost/runaway guard, not a protocol limit; override with CLAUDE_SMS_MAXCHARS.
 
 log()  { printf '%s  %s\n' "$(date -Is)" "$*" >> "$ALOG"; }
 wlog() { printf '%s  %s\n' "$(date -Is)" "$*" >> "$WLOG"; }
