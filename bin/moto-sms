@@ -154,6 +154,27 @@ run_claude() {                                  # $1 = prompt
 	send_sms "${note}${reply}" "$from"
 }
 
+# Text version of the Claude Code statusline (~/.claude/powerline-with-identity.sh):
+# the billed Anthropic account + the git commit identity, evaluated at the live
+# shell's cwd. The powerline box's session segments (cost/context/model) need a
+# live CC session's stdin JSON, which doesn't exist over SMS, so they're omitted.
+cc_status() {
+	local dir acct name cc_email cc_org tag ghcfg
+	ensure_shell; dir=$(shell_cwd); [ -z "$dir" ] && dir="$HOME"
+	# mirror the dir-driven gh account switch (careflow => work gh config)
+	case "$dir" in
+		"$HOME"/code/careflow/*) ghcfg="$HOME/.config/gh-careflow" ;;
+		*)                       ghcfg="$HOME/.config/gh" ;;
+	esac
+	acct=$(GH_CONFIG_DIR="$ghcfg" gh auth status --active 2>&1 | sed -n 's/.*account \([^ ]*\).*/\1/p' | head -1)
+	name=$(git -C "$dir" config user.name 2>/dev/null)
+	cc_email=$(jq -r '.oauthAccount.emailAddress // empty' "$HOME/.claude.json" 2>/dev/null)
+	cc_org=$(jq -r '.oauthAccount.organizationName // empty' "$HOME/.claude.json" 2>/dev/null)
+	case "$cc_org$cc_email" in *[Cc]areflow*|*gocareflow*) tag="WORK" ;; *) tag="personal" ;; esac
+	printf 'Claude Code acct [%s]:\n%s%s\n\ngit identity @ %s:\ngh: %s\nname: %s' \
+		"$tag" "${cc_email:-none}" "${cc_org:+ - $cc_org}" "$dir" "${acct:-none}" "${name:-none}"
+}
+
 # ── handle: route ONE message (raw JSON on stdin) ─────────────────────────────
 cmd_handle() {
 	local msg from text sender_key first rest name alias act names lines n mark f out
@@ -180,9 +201,11 @@ cmd_handle() {
 	# like ./run.sh, ., .bashrc fall through to the active mode instead of erroring.
 	case "$first" in
 		.help)
-			send_sms $'moto-sms commands\n\nchat: just type a message\n.new [name] - fresh thread\n.stop - end thread\n.resume <name> - switch\n.convos - list threads\n\nshell:\n!<cmd> - run one command\n.sh - shell mode (cd persists)\n.aish - Claude runs cmds\n.ai - back to chat\n\n.model haiku|sonnet|opus|fable\n.status' "$from"; return 0 ;;
+			send_sms $'moto-sms commands\n\nchat: just type a message\n.new [name] - fresh thread\n.stop - end thread\n.resume <name> - switch\n.convos - list threads\n\nshell:\n!<cmd> - run one command\n.sh - shell mode (cd persists)\n.aish - Claude runs cmds\n.ai - back to chat\n\n.model haiku|sonnet|opus|fable\n.status - mode/thread/cwd\n.ccstatus - cc account + git identity' "$from"; return 0 ;;
 		.status)
 			send_sms "mode=$(get_mode) thread=$(get_active) model=$(thread_model "$(get_active)") cwd=$(ensure_shell; shell_cwd)" "$from"; return 0 ;;
+		.ccstatus)
+			send_sms "$(cc_status)" "$from"; return 0 ;;
 		.new)
 			name="${rest:-default}"; name=$(printf '%s' "$name" | awk '{print $1}')
 			: > "$TDIR/${name}.session"; set_active "$name"; set_mode claude
