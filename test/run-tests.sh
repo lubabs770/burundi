@@ -34,6 +34,7 @@ ok "norm formatted"   "$(norm '+1 (732) 664-2170')" "7326642170"
 ok "norm plain"       "$(norm '17326642170')"        "7326642170"
 ok "norm short"       "$(norm '2170')"               "2170"
 ok "norm letters"     "$(norm 'abc123def4567890xy')" "1234567890"
+ok "norm intl >10"    "$(norm '+447911123456')"       "7911123456"
 
 # ── resolve_model: alias table + passthrough for unknown ids ──────────────────
 ok "resolve haiku"    "$(resolve_model haiku)"   "claude-haiku-4-5-20251001"
@@ -56,6 +57,11 @@ ok "gsm7 accent fold"  "$(printf 'caf\xc3\xa9' | gsm7)"          "cafe"
 ok "gsm7 backtick"     "$(printf 'a \x60b\x60' | gsm7)"          "a 'b'"
 ok "gsm7 ellipsis"     "$(printf 'wait\xe2\x80\xa6' | gsm7)"     "wait..."
 ok "gsm7 drop emoji"   "$(printf 'hi\xf0\x9f\x98\x80!' | gsm7)"  "hi!"
+ok "gsm7 upper accent" "$(printf 'CAF\xc3\x89' | gsm7)"          "CAFE"
+ok "gsm7 eszett"       "$(printf 'stra\xc3\x9fe' | gsm7)"        "strasse"
+ok "gsm7 ae ligature"  "$(printf 'encyclop\xc3\xa6dia' | gsm7)"  "encyclopaedia"
+ok "gsm7 bullet"       "$(printf 'a\xe2\x80\xa2b' | gsm7)"       "a-b"
+ok "gsm7 ascii passthru" "$(printf 'ok ~!@#$%%^&*()' | gsm7)"    'ok ~!@#$%^&*()'
 
 # ── send_sms: DRYRUN path — gsm7 folding + MAXCHARS cap, no network ────────────
 # SMS_DRYRUN=1 makes send_sms echo "[DRYRUN reply -> <to>] <body>" instead of
