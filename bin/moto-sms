@@ -362,7 +362,7 @@ cmd_threads() {
 	done
 }
 cmd_tail() { tail -n "${1:-20}" "$ALOG"; }
-cmd_help() { sed -n '2,20p' "$SELF/bin/moto-sms" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,16p' "$SELF/bin/moto-sms" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-help}" in
 	relay)    shift; cmd_relay "$@" ;;
