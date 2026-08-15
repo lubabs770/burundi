@@ -57,5 +57,17 @@ ok "gsm7 backtick"     "$(printf 'a \x60b\x60' | gsm7)"          "a 'b'"
 ok "gsm7 ellipsis"     "$(printf 'wait\xe2\x80\xa6' | gsm7)"     "wait..."
 ok "gsm7 drop emoji"   "$(printf 'hi\xf0\x9f\x98\x80!' | gsm7)"  "hi!"
 
+# ── send_sms: DRYRUN path — gsm7 folding + MAXCHARS cap, no network ────────────
+# SMS_DRYRUN=1 makes send_sms echo "[DRYRUN reply -> <to>] <body>" instead of
+# hitting the gateway, so we can assert the outbound body without any curl.
+unwrap() { sed 's/^\[DRYRUN[^]]*\] //'; }   # strip the DRYRUN prefix, keep body
+ok "send folds curly quote" \
+	"$(SMS_DRYRUN=1 send_sms "$(printf 'it\xe2\x80\x99s')" x | unwrap)" "it's"
+ok "send caps at MAXCHARS" \
+	"$( ( MAXCHARS=10; SMS_DRYRUN=1 send_sms "$(printf 'a%.0s' {1..50})" x ) | unwrap)" \
+	"aaaaaaaaaa"
+ok "send drops emoji-only to nothing" \
+	"$(SMS_DRYRUN=1 send_sms "$(printf '\xf0\x9f\x98\x80')" x)" ""
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

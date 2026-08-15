@@ -61,7 +61,8 @@ symlink); only unit changes need a re-run.
     ./test/run-tests.sh
 
 Unit tests for the pure helpers in `lib/common.sh` (`norm`, `resolve_model`,
-`allow_check`, `gsm7`). No network/systemd — runs against a throwaway `$HOME`.
+`allow_check`, `gsm7`, and `send_sms` via `SMS_DRYRUN=1`). No network/systemd —
+runs against a throwaway `$HOME`.
 
 ## Security
 
