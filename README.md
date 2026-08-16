@@ -40,6 +40,7 @@ Config/state/data keep their XDG homes (only the code lives here):
     .ai                       back to conversation
     .model [haiku|sonnet|opus|fable]   per-thread model (no arg = show)
     .status .help
+    .ccstatus                 Claude Code account + git identity + active 5h usage
 
 Commands use a leading '.' (easier to reach than '/' on phone keyboards).
 Unknown '.'-tokens aren't intercepted, so shell paths (./run.sh, ., .bashrc)
@@ -54,6 +55,14 @@ persist across texts.
 
 Idempotent. Edits to `bin/moto-sms` take effect immediately (systemd runs the
 symlink); only unit changes need a re-run.
+
+## Tests
+
+    ./test/run-tests.sh
+
+Unit tests for the pure helpers in `lib/common.sh` (`norm`, `resolve_model`,
+`allow_check`, `gsm7`, and `send_sms` via `SMS_DRYRUN=1`). No network/systemd —
+runs against a throwaway `$HOME`.
 
 ## Security
 
